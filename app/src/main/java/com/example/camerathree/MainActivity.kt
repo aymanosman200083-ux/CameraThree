@@ -47,6 +47,20 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cached
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.MotionPhotosOn
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -58,6 +72,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -76,9 +91,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 val Yellow = Color(0xFFFFD60A)
-val HEADER = 100.dp
+val SBlue = Color(0xFF2F7BFF)
+val GYellow = Color(0xFFF7C04A)
+val HEADER = 108.dp
 val RATIOS = listOf(3f / 4f, 9f / 16f, 1f)
-val RATIO_LABELS = listOf("4:3", "16:9", "1:1")
+val RATIO_LABELS = listOf("3:4", "9:16", "1:1")
+val EFFECT_NAMES = listOf("تلقائي", "زاهي", "ناعم")
 
 enum class Look(val sat: Float, val con: Float, val warm: Float, val lift: Float) {
     S(1.22f, 1.05f, 0.00f, 4f),
@@ -87,9 +105,10 @@ enum class Look(val sat: Float, val con: Float, val warm: Float, val lift: Float
 }
 
 // معاينة تقريبية فقط، المعالجة الكاملة بتتطبق على الصورة المحفوظة
-fun colorMatrix(l: Look, night: Boolean): ColorMatrix {
+fun colorMatrix(l: Look, night: Boolean, effect: Int): ColorMatrix {
     val s = ColorMatrix()
-    s.setSaturation(l.sat)
+    val k = if (effect == 1) 1.25f else if (effect == 2) 0.85f else 1f
+    s.setSaturation(l.sat * k)
     val c = l.con
     val t = (1f - c) * 128f + l.lift + (if (night) 8f else 0f)
     val m = ColorMatrix(floatArrayOf(
@@ -108,10 +127,24 @@ class Params(
     val wbR: Float, val wbG: Float, val wbB: Float, val clarity: Float, val sharp: Float
 )
 
-fun paramsOf(l: Look): Params = when (l) {
-    Look.IPHONE -> Params(0.47, 0.18, 0.05, 0.0, 0.82, 0.75, 0.12f, 0.6f, 1.03f, 1.0f, 0.97f, 0.15f, 0.35f)
-    Look.S -> Params(0.50, 0.30, 0.04, 0.0, 0.90, 0.90, 0.24f, 0.3f, 1.0f, 1.0f, 1.03f, 0.12f, 0.70f)
-    Look.G -> Params(0.43, 0.38, 0.0, 0.03, 0.80, 0.70, 0.06f, 0.5f, 0.99f, 1.0f, 1.02f, 0.45f, 0.45f)
+fun paramsOf(l: Look, effect: Int, hdr: Boolean): Params {
+    var b = when (l) {
+        Look.IPHONE -> Params(0.47, 0.18, 0.05, 0.0, 0.82, 0.75, 0.12f, 0.6f, 1.03f, 1.0f, 0.97f, 0.15f, 0.35f)
+        Look.S -> Params(0.50, 0.30, 0.04, 0.0, 0.90, 0.90, 0.24f, 0.3f, 1.0f, 1.0f, 1.03f, 0.12f, 0.70f)
+        Look.G -> Params(0.43, 0.38, 0.0, 0.03, 0.80, 0.70, 0.06f, 0.5f, 0.99f, 1.0f, 1.02f, 0.45f, 0.45f)
+    }
+    if (effect == 1) {
+        b = Params(b.target, b.contrast + 0.10, b.lift, b.black, b.hlStart, b.hlSlope,
+            b.sat * 1.6f + 0.06f, b.vib, b.wbR, b.wbG, b.wbB, b.clarity, b.sharp)
+    } else if (effect == 2) {
+        b = Params(b.target, b.contrast - 0.08, b.lift + 0.02, b.black, b.hlStart, b.hlSlope,
+            b.sat * 0.7f, b.vib, b.wbR, b.wbG, b.wbB, b.clarity * 0.4f, b.sharp * 0.4f)
+    }
+    if (hdr) {
+        b = Params(b.target + 0.02, b.contrast - 0.04, b.lift + 0.05, b.black, b.hlStart, b.hlSlope * 0.8,
+            b.sat, b.vib, b.wbR, b.wbG, b.wbB, b.clarity * 1.3f, b.sharp)
+    }
+    return b
 }
 
 fun lumOf(c: Int): Float =
@@ -141,14 +174,13 @@ fun boxBlur(a: FloatArray, w: Int, h: Int, r: Int): FloatArray {
     return out
 }
 
-fun enhance(bmp: Bitmap, look: Look, night: Boolean) {
-    val p = paramsOf(look)
+fun enhance(bmp: Bitmap, look: Look, night: Boolean, effect: Int, hdr: Boolean) {
+    val p = paramsOf(look, effect, hdr)
     val w = bmp.width
     val h = bmp.height
     val px = IntArray(w * h)
     bmp.getPixels(px, 0, w, 0, 0, w, h)
 
-    // ضبط الإضاءة تلقائياً
     var sum = 0.0
     var n = 0
     var i = 0
@@ -161,7 +193,6 @@ fun enhance(bmp: Bitmap, look: Look, night: Boolean) {
     val target = p.target + (if (night) 0.05 else 0.0)
     val gamma = (Math.log(target) / Math.log(mean)).coerceIn(0.7, 1.4)
 
-    // منحنى الألوان
     val maxV = p.hlStart + (1.0 - p.hlStart) * p.hlSlope
     val lut = IntArray(256)
     for (x in 0..255) {
@@ -175,7 +206,6 @@ fun enhance(bmp: Bitmap, look: Look, night: Boolean) {
         lut[x] = (v.coerceIn(0.0, 1.0) * 255.0 + 0.5).toInt()
     }
 
-    // نسخة صغيرة مموهة لحساب الوضوح المحلي
     val sw = w / 4
     val sh = h / 4
     var small = FloatArray(sw * sh)
@@ -246,13 +276,8 @@ fun enhance(bmp: Bitmap, look: Look, night: Boolean) {
 fun flashLabel(f: Int): String = when (f) { 0 -> "⚡A"; 1 -> "⚡"; else -> "⚡✕" }
 fun timerLabel(t: Int): String = if (t == 0) "⏱" else "⏱" + t
 
-fun zoomLabel(v: Float, sel: Boolean, look: Look): String {
-    val whole = v % 1f == 0f
-    val base = if (whole) v.toInt().toString()
-    else if (look == Look.IPHONE) "." + v.toString().substringAfter('.')
-    else v.toString()
-    return if (sel || look == Look.G) base + "x" else base
-}
+fun zoomText(v: Float): String =
+    if (v % 1f == 0f) v.toInt().toString() + "x" else v.toString() + "x"
 
 fun loadThumb(ctx: Context, uri: Uri): Bitmap? {
     return try {
@@ -299,6 +324,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ---------- مكونات مشتركة ----------
 @Composable
 fun Ic(t: String, color: Color = Color.White, size: Int = 19, onClick: () -> Unit) {
     Box(
@@ -308,11 +334,81 @@ fun Ic(t: String, color: Color = Color.White, size: Int = 19, onClick: () -> Uni
 }
 
 @Composable
-fun RoundBtn(size: Dp, bg: Color, onClick: () -> Unit, content: @Composable () -> Unit) {
+fun IconBtn(icon: ImageVector, tint: Color, size: Dp = 24.dp, onClick: () -> Unit) {
     Box(
-        Modifier.size(size).clip(CircleShape).background(bg).clickable { onClick() },
+        Modifier.size(40.dp).clip(CircleShape).clickable { onClick() },
         contentAlignment = Alignment.Center
-    ) { content() }
+    ) { Icon(icon, null, tint = tint, modifier = Modifier.size(size)) }
+}
+
+@Composable
+fun FlashBtn(flash: Int, onClick: () -> Unit) {
+    val icon = when (flash) {
+        0 -> Icons.Filled.FlashAuto
+        1 -> Icons.Filled.FlashOn
+        else -> Icons.Filled.FlashOff
+    }
+    IconBtn(icon, if (flash == 1) Yellow else Color.White) { onClick() }
+}
+
+@Composable
+fun TimerBtn(timer: Int, onClick: () -> Unit) {
+    Box(
+        Modifier.size(40.dp).clip(CircleShape).clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(Icons.Outlined.Timer, null, tint = if (timer > 0) Yellow else Color.White, modifier = Modifier.size(24.dp))
+        if (timer > 0) {
+            Text(
+                timer.toString(), color = Yellow, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(2.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun BoxedLabel(text: String, tint: Color, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(6.dp))
+            .border(1.5.dp, tint, RoundedCornerShape(6.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 6.dp, vertical = 3.dp)
+    ) { Text(text, color = tint, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+}
+
+@Composable
+fun RingIcon(icon: ImageVector, tint: Color, onClick: () -> Unit) {
+    Box(
+        Modifier.size(42.dp).clip(CircleShape).background(Color(0xCC1C1C1E))
+            .border(1.dp, Color(0xFF4A4A4C), CircleShape).clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) { Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp)) }
+}
+
+@Composable
+fun LookSwitcher(look: Look, onPick: (Look) -> Unit) {
+    Row(
+        Modifier.clip(CircleShape).background(Color(0xFF111111))
+            .border(1.dp, Color(0xFF3A3A3C), CircleShape).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val items = listOf(Look.S to "S", Look.G to "G", Look.IPHONE to "iPhone")
+        for ((l, label) in items) {
+            val sel = look == l
+            val bg = if (!sel) Color.Transparent else when (l) {
+                Look.S -> SBlue
+                Look.G -> GYellow
+                Look.IPHONE -> Color(0xFFD1D1D6)
+            }
+            val fg = if (!sel) Color.White else if (l == Look.S) Color.White else Color.Black
+            Box(
+                Modifier.clip(CircleShape).background(bg).clickable { onPick(l) }
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+            ) { Text(label, color = fg, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+        }
+    }
 }
 
 @Composable
@@ -340,35 +436,75 @@ fun ShutterBtn(size: Dp, ring: Dp, video: Boolean, rec: Boolean, onClick: () -> 
 }
 
 @Composable
-fun ZoomRow(look: Look, zooms: List<Float>, zoom: Float, onPick: (Float) -> Unit) {
-    val container = when (look) {
-        Look.IPHONE -> Modifier
-        Look.S -> Modifier.clip(CircleShape).background(Color(0x66000000)).padding(4.dp)
-        Look.G -> Modifier.clip(CircleShape).background(Color(0x99000000)).padding(4.dp)
+fun ModeText(label: String, sel: Boolean, selColor: Color, size: Int, onClick: () -> Unit) {
+    Box(Modifier.clickable { onClick() }.padding(horizontal = 4.dp, vertical = 8.dp)) {
+        Text(
+            label, color = if (sel) selColor else Color(0xFFDDDDDD), fontSize = size.sp,
+            fontWeight = if (sel) FontWeight.Bold else FontWeight.Medium
+        )
     }
+}
+
+@Composable
+fun ModePill(label: String, sel: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(20.dp))
+            .background(if (sel) GYellow else Color.Transparent)
+            .clickable { onClick() }
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Text(
+            label, color = if (sel) Color.Black else Color.White,
+            fontSize = 14.sp, fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+fun ZoomRow(look: Look, zooms: List<Float>, zoom: Float, onPick: (Float) -> Unit) {
     Row(
-        container,
-        horizontalArrangement = Arrangement.spacedBy(if (look == Look.IPHONE) 4.dp else 2.dp),
+        Modifier.clip(CircleShape).background(Color(0x99000000)).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         for (v in zooms) {
             val sel = abs(zoom - v) < 0.05f
-            val bg = when (look) {
-                Look.IPHONE -> if (sel) Color(0xAA000000) else Color.Transparent
-                Look.S -> if (sel) Color(0x44FFFFFF) else Color.Transparent
-                Look.G -> if (sel) Color.White else Color.Transparent
+            var mod = Modifier.size(40.dp).clip(CircleShape)
+            if (sel) {
+                mod = if (look == Look.G) mod.background(GYellow)
+                else mod.background(Color(0xFF111111)).border(1.5.dp, Color.White, CircleShape)
             }
-            val fg = when (look) {
-                Look.IPHONE -> if (sel) Yellow else Color.White
-                Look.S -> Color.White
-                Look.G -> if (sel) Color.Black else Color.White
-            }
-            var mod = Modifier.size(if (look == Look.G) 40.dp else 34.dp).clip(CircleShape).background(bg)
-            if (sel && look == Look.S) mod = mod.border(1.5.dp, Color.White, CircleShape)
+            val fg = if (sel && look == Look.G) Color.Black else Color.White
             Box(mod.clickable { onPick(v) }, contentAlignment = Alignment.Center) {
-                Text(zoomLabel(v, sel, look), color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(zoomText(v), color = fg, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             }
         }
+    }
+}
+
+@Composable
+fun SettingRow(label: String, on: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.width(220.dp).clickable { onClick() }.padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Text(
+            if (on) "تشغيل" else "إيقاف",
+            color = if (on) Yellow else Color(0xFF8E8E93), fontSize = 13.sp, fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+fun SettingsPanel(
+    grid: Boolean, hq: Boolean, mirror: Boolean,
+    onGrid: () -> Unit, onHq: () -> Unit, onMirror: () -> Unit, modifier: Modifier
+) {
+    Column(modifier.clip(RoundedCornerShape(16.dp)).background(Color(0xEE1C1C1E)).padding(vertical = 6.dp)) {
+        SettingRow("خطوط الشبكة", grid, onGrid)
+        SettingRow("جودة عالية", hq, onHq)
+        SettingRow("عكس السيلفي", mirror, onMirror)
     }
 }
 
@@ -380,13 +516,19 @@ fun CameraApp() {
     var look by remember { mutableStateOf(Look.IPHONE) }
     var front by remember { mutableStateOf(false) }
     var night by remember { mutableStateOf(false) }
+    var hdr by remember { mutableStateOf(false) }
+    var pro by remember { mutableStateOf(false) }
+    var ev by remember { mutableStateOf(0) }
     var zoom by remember { mutableStateOf(1f) }
     var flash by remember { mutableStateOf(0) }
     var timer by remember { mutableStateOf(0) }
     var grid by remember { mutableStateOf(false) }
     var ratioIdx by remember { mutableStateOf(0) }
     var hq by remember { mutableStateOf(true) }
+    var mirror by remember { mutableStateOf(false) }
+    var effect by remember { mutableStateOf(0) }
     var expanded by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var isVideo by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf<Recording?>(null) }
     var recSeconds by remember { mutableStateOf(0) }
@@ -438,12 +580,12 @@ fun CameraApp() {
             camera?.cameraControl?.setZoomRatio(zoom.coerceIn(z.minZoomRatio, z.maxZoomRatio))
         }
     }
-    LaunchedEffect(night, camera) {
+    LaunchedEffect(night, camera, pro, ev) {
         val info = camera?.cameraInfo
         if (info != null && info.exposureState.isExposureCompensationSupported) {
-            camera?.cameraControl?.setExposureCompensationIndex(
-                if (night) info.exposureState.exposureCompensationRange.upper / 2 else 0
-            )
+            val r = info.exposureState.exposureCompensationRange
+            val idx = (if (pro) ev else 0) + (if (night) r.upper / 2 else 0)
+            camera?.cameraControl?.setExposureCompensationIndex(idx.coerceIn(r.lower, r.upper))
         }
     }
     LaunchedEffect(flash) {
@@ -475,18 +617,20 @@ fun CameraApp() {
 
     val ratio = RATIOS[ratioIdx]
     val full = ratio < 0.6f
-    val gap = if (look == Look.G && !full) 8.dp else 0.dp
-    val corner = if (look == Look.G && !full) 28.dp else 0.dp
     val zooms = when (look) {
-        Look.IPHONE -> listOf(0.5f, 1f, 2f, 4f, 8f)
-        Look.S -> listOf(0.6f, 1f, 3f, 5f, 10f)
         Look.G -> listOf(0.5f, 1f, 2f, 5f)
+        else -> listOf(0.5f, 1f, 2f)
     }
     val previewMod = if (full) Modifier.fillMaxSize()
-    else Modifier.padding(top = HEADER).padding(horizontal = gap).fillMaxWidth().aspectRatio(ratio)
+    else Modifier.padding(top = HEADER).fillMaxWidth().aspectRatio(ratio)
+
+    val isRec = recording != null
+    val unavailable: (String) -> Unit = { name ->
+        Toast.makeText(ctx, "وضع " + name + " غير متاح حالياً", Toast.LENGTH_SHORT).show()
+    }
 
     val doCapture: () -> Unit = {
-        takePhoto(ctx, capture, look, night, ratio, hq) { uri -> lastUri = uri }
+        takePhoto(ctx, capture, look, night, effect, hdr, ratio, hq, mirror && front) { uri -> lastUri = uri }
     }
     val onShutter: () -> Unit = {
         if (isVideo) {
@@ -512,19 +656,26 @@ fun CameraApp() {
             }
         }
     }
-    val onFlip: () -> Unit = { if (recording == null) front = !front }
-    val isRec = recording != null
-    val moonColor = if (night) Yellow else Color.White
+    val onFlip: () -> Unit = { if (!isRec) front = !front }
+    val cycleTimer: () -> Unit = { timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 } }
+    val cycleEffect: () -> Unit = {
+        effect = (effect + 1) % 3
+        Toast.makeText(ctx, "التأثير: " + EFFECT_NAMES[effect], Toast.LENGTH_SHORT).show()
+    }
+    val modePhoto: () -> Unit = { if (!isRec) { isVideo = false; night = false; pro = false } }
+    val modeVideo: () -> Unit = { if (!isRec) { isVideo = true; pro = false } }
+    val modePro: () -> Unit = { if (!isRec) { isVideo = false; night = false; pro = true } }
+    val modeNight: () -> Unit = { if (!isRec) { isVideo = false; pro = false; night = !night } }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { previewView },
             update = { view ->
                 val paint = Paint()
-                paint.colorFilter = ColorMatrixColorFilter(colorMatrix(look, night))
+                paint.colorFilter = ColorMatrixColorFilter(colorMatrix(look, night, effect))
                 view.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, paint)
             },
-            modifier = previewMod.clip(RoundedCornerShape(corner))
+            modifier = previewMod
         )
 
         Box(
@@ -549,7 +700,7 @@ fun CameraApp() {
                 if (grid) {
                     val w = size.width
                     val h = size.height
-                    val c = Color(0x66FFFFFF)
+                    val c = Color(0x88FFFFFF)
                     drawLine(c, Offset(w / 3f, 0f), Offset(w / 3f, h), 1.5f)
                     drawLine(c, Offset(2f * w / 3f, 0f), Offset(2f * w / 3f, h), 1.5f)
                     drawLine(c, Offset(0f, h / 3f), Offset(w, h / 3f), 1.5f)
@@ -568,83 +719,72 @@ fun CameraApp() {
         }
 
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxWidth().height(HEADER)) {
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    Modifier.align(Alignment.CenterHorizontally)
-                        .clip(CircleShape).background(Color(0x33FFFFFF)).padding(3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    val items = listOf(Look.S to "S", Look.G to "G", Look.IPHONE to "🍎")
-                    for ((l, label) in items) {
-                        Box(
-                            Modifier.size(38.dp).clip(CircleShape)
-                                .background(if (look == l) Color.White else Color.Transparent)
-                                .clickable { look = l; zoom = 1f; expanded = false },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                label, fontSize = 17.sp, fontWeight = FontWeight.Bold,
-                                color = if (look == l) Color.Black else Color.White
-                            )
+            // ---------- الشريط العلوي ----------
+            Box(Modifier.fillMaxWidth().height(HEADER)) {
+                Box(Modifier.align(Alignment.TopCenter).padding(top = 10.dp)) {
+                    LookSwitcher(look) { l -> look = l; zoom = 1f; expanded = false; showSettings = false }
+                }
+                when (look) {
+                    Look.IPHONE -> {
+                        Box(Modifier.align(Alignment.TopStart).padding(start = 16.dp, top = 8.dp)) {
+                            val fi = when (flash) {
+                                0 -> Icons.Filled.FlashAuto
+                                1 -> Icons.Filled.FlashOn
+                                else -> Icons.Filled.FlashOff
+                            }
+                            RingIcon(fi, if (flash == 1) Yellow else Color.White) { flash = (flash + 1) % 3 }
+                        }
+                        Box(Modifier.align(Alignment.TopEnd).padding(end = 16.dp, top = 8.dp)) {
+                            RingIcon(Icons.Filled.MotionPhotosOn, if (night) Yellow else Color.White) { night = !night }
+                        }
+                        Box(Modifier.align(Alignment.TopCenter).padding(top = 58.dp)) {
+                            IconBtn(
+                                if (expanded) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                Color(0xFFBDBDBD), 22.dp
+                            ) { expanded = !expanded }
                         }
                     }
-                }
-                Box(Modifier.fillMaxWidth().height(50.dp)) {
-                    when (look) {
-                        Look.IPHONE -> Row(
-                            Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    Look.S -> Row(
+                        Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(50.dp).padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconBtn(Icons.Outlined.Settings, Color.White) { showSettings = !showSettings }
+                        FlashBtn(flash) { flash = (flash + 1) % 3 }
+                        BoxedLabel(RATIO_LABELS[ratioIdx], Color.White) { ratioIdx = (ratioIdx + 1) % 3 }
+                        BoxedLabel("HDR", if (hdr) Yellow else Color.White) { hdr = !hdr }
+                        IconBtn(Icons.Outlined.Tune, if (effect != 0) Yellow else Color.White) { cycleEffect() }
+                    }
+                    Look.G -> Row(
+                        Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(50.dp).padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FlashBtn(flash) { flash = (flash + 1) % 3 }
+                        BoxedLabel("HDR+", if (hdr) GYellow else Color.White) { hdr = !hdr }
+                        Box(
+                            Modifier.size(40.dp).clip(CircleShape).clickable { cycleTimer() },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                Modifier.clip(CircleShape).background(Color(0xCC2A2A2A))
-                                    .clickable { hq = !hq }
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)
-                            ) {
-                                Text(if (hq) "HQ" else "STD", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            }
-                            Spacer(Modifier.weight(1f))
-                            Row(
-                                Modifier.clip(CircleShape).background(Color(0xCC2A2A2A)).padding(horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Ic("☾", moonColor, 20) { night = !night }
-                                Ic(flashLabel(flash), if (flash == 1) Yellow else Color.White, 17) { flash = (flash + 1) % 3 }
-                                Ic(if (expanded) "⌃" else "⋯", Color.White, 20) { expanded = !expanded }
+                            Icon(
+                                Icons.Filled.CenterFocusStrong, null,
+                                tint = if (timer > 0) GYellow else Color.White, modifier = Modifier.size(24.dp)
+                            )
+                            if (timer > 0) {
+                                Text(
+                                    timer.toString(), color = GYellow, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.align(Alignment.BottomEnd).padding(2.dp)
+                                )
                             }
                         }
-                        Look.S -> Row(
-                            Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Ic("▦", if (grid) Yellow else Color.White, 19) { grid = !grid }
-                            Ic(flashLabel(flash), if (flash == 1) Yellow else Color.White, 18) { flash = (flash + 1) % 3 }
-                            Ic(timerLabel(timer), if (timer > 0) Yellow else Color.White, 18) {
-                                timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 }
-                            }
-                            Ic(RATIO_LABELS[ratioIdx], Color.White, 15) { ratioIdx = (ratioIdx + 1) % 3 }
-                            Ic("☾", moonColor, 21) { night = !night }
-                        }
-                        Look.G -> Row(
-                            Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Ic(flashLabel(flash), if (flash == 1) Yellow else Color.White, 19) { flash = (flash + 1) % 3 }
-                            Ic("☾", if (night) Color(0xFFA8C7FA) else Color.White, 21) { night = !night }
-                            Ic(timerLabel(timer), if (timer > 0) Color(0xFFA8C7FA) else Color.White, 19) {
-                                timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 }
-                            }
-                            Ic(RATIO_LABELS[ratioIdx], Color.White, 15) { ratioIdx = (ratioIdx + 1) % 3 }
-                            Ic("▦", if (grid) Color(0xFFA8C7FA) else Color.White, 19) { grid = !grid }
-                        }
+                        IconBtn(Icons.Outlined.Settings, Color.White) { showSettings = !showSettings }
                     }
                 }
             }
 
+            // ---------- المعاينة ومفاتيح فوقها ----------
             val slotMod = if (full) Modifier.fillMaxWidth().weight(1f)
-            else Modifier.padding(horizontal = gap).fillMaxWidth().aspectRatio(ratio)
+            else Modifier.fillMaxWidth().aspectRatio(ratio)
             Box(slotMod) {
                 if (countdown > 0) {
                     Text(
@@ -671,129 +811,84 @@ fun CameraApp() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Ic(RATIO_LABELS[ratioIdx], Color.White, 14) { ratioIdx = (ratioIdx + 1) % 3 }
-                        Ic(timerLabel(timer), if (timer > 0) Yellow else Color.White, 16) {
-                            timer = when (timer) { 0 -> 3; 3 -> 10; else -> 0 }
-                        }
+                        Ic(timerLabel(timer), if (timer > 0) Yellow else Color.White, 16) { cycleTimer() }
                         Ic("▦", if (grid) Yellow else Color.White, 18) { grid = !grid }
+                        Ic("HDR", if (hdr) Yellow else Color.White, 13) { hdr = !hdr }
+                        Ic(if (hq) "HQ" else "STD", Color.White, 13) { hq = !hq }
                     }
+                }
+                if (look == Look.S && pro) {
+                    Row(
+                        Modifier.align(Alignment.TopCenter).padding(top = 10.dp)
+                            .clip(CircleShape).background(Color(0xCC1C1C1E)).padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Ic("−", Color.White, 22) { ev = (ev - 1).coerceIn(-6, 6) }
+                        Text(
+                            "EV " + (if (ev > 0) "+" else "") + ev, color = Color.White,
+                            fontSize = 14.sp, fontWeight = FontWeight.Bold
+                        )
+                        Ic("+", Color.White, 22) { ev = (ev + 1).coerceIn(-6, 6) }
+                    }
+                }
+                if (showSettings) {
+                    SettingsPanel(
+                        grid, hq, mirror,
+                        { grid = !grid }, { hq = !hq }, { mirror = !mirror },
+                        Modifier.align(Alignment.TopCenter).padding(top = 64.dp)
+                    )
                 }
                 Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)) {
                     ZoomRow(look, zooms, zoom) { zoom = it }
                 }
             }
 
+            // ---------- الأزرار السفلية ----------
             val ctrlMod = if (full) Modifier.fillMaxWidth().background(Color(0x66000000)).padding(bottom = 12.dp)
             else Modifier.fillMaxWidth().weight(1f)
             Column(
                 ctrlMod,
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = if (full) Arrangement.spacedBy(14.dp) else Arrangement.SpaceEvenly
+                verticalArrangement = if (full) Arrangement.spacedBy(10.dp) else Arrangement.SpaceEvenly
             ) {
+                val thumbShape: Shape = if (look == Look.IPHONE) RoundedCornerShape(10.dp) else CircleShape
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 36.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Thumb(thumb, 56.dp, thumbShape) { openGallery(ctx, lastUri) }
+                    ShutterBtn(78.dp, 3.dp, isVideo, isRec) { onShutter() }
+                    Box(
+                        Modifier.size(56.dp).clip(CircleShape)
+                            .border(1.5.dp, Color(0x99FFFFFF), CircleShape).clickable { onFlip() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Filled.Cached, null, tint = Color.White, modifier = Modifier.size(28.dp))
+                    }
+                }
                 when (look) {
-                    Look.IPHONE -> {
-                        ShutterBtn(78.dp, 4.dp, isVideo, isRec) { onShutter() }
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 28.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Thumb(thumb, 46.dp, CircleShape) { openGallery(ctx, lastUri) }
-                            Row(Modifier.clip(CircleShape).background(Color(0xFF1C1C1E)).padding(3.dp)) {
-                                Box(
-                                    Modifier.clip(CircleShape)
-                                        .background(if (isVideo) Color(0xFF3A3A3C) else Color.Transparent)
-                                        .clickable { if (!isRec) isVideo = true }
-                                        .padding(horizontal = 18.dp, vertical = 9.dp)
-                                ) {
-                                    Text("VIDEO", color = if (isVideo) Yellow else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                }
-                                Box(
-                                    Modifier.clip(CircleShape)
-                                        .background(if (!isVideo) Color(0xFF3A3A3C) else Color.Transparent)
-                                        .clickable { if (!isRec) isVideo = false }
-                                        .padding(horizontal = 18.dp, vertical = 9.dp)
-                                ) {
-                                    Text("PHOTO", color = if (!isVideo) Yellow else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            RoundBtn(46.dp, Color(0xFF1C1C1E), onFlip) {
-                                Text("⟳", color = Color.White, fontSize = 22.sp)
-                            }
-                        }
+                    Look.S -> Row(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                        ModeText("PHOTO", !isVideo && !night && !pro, SBlue, 14) { modePhoto() }
+                        ModeText("VIDEO", isVideo, SBlue, 14) { modeVideo() }
+                        ModeText("PRO", pro, SBlue, 14) { modePro() }
+                        ModeText("NIGHT", night && !isVideo && !pro, SBlue, 14) { modeNight() }
                     }
-                    Look.S -> {
-                        Row(horizontalArrangement = Arrangement.spacedBy(26.dp)) {
-                            Text(
-                                "Night", fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                                color = if (night) Color(0xFFFFD54F) else Color(0xCCFFFFFF),
-                                modifier = Modifier.clickable { night = !night }
-                            )
-                            Text(
-                                "Photo", fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                                color = if (!isVideo) Color(0xFFFFD54F) else Color(0xCCFFFFFF),
-                                modifier = Modifier.clickable { if (!isRec) isVideo = false }
-                            )
-                            Text(
-                                "Video", fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                                color = if (isVideo) Color(0xFFFFD54F) else Color(0xCCFFFFFF),
-                                modifier = Modifier.clickable { if (!isRec) isVideo = true }
-                            )
-                        }
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 36.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Thumb(thumb, 50.dp, RoundedCornerShape(12.dp)) { openGallery(ctx, lastUri) }
-                            ShutterBtn(76.dp, 3.dp, isVideo, isRec) { onShutter() }
-                            RoundBtn(50.dp, Color(0x33FFFFFF), onFlip) {
-                                Text("⟳", color = Color.White, fontSize = 22.sp)
-                            }
-                        }
+                    Look.G -> Row(
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ModePill("Photo", !isVideo && !night) { modePhoto() }
+                        ModePill("Portrait", false) { unavailable("Portrait") }
+                        ModePill("Night Sight", night && !isVideo) { modeNight() }
+                        ModePill("Video", isVideo) { modeVideo() }
                     }
-                    Look.G -> {
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            val selBg = Color(0xFFD3E3FD)
-                            val selFg = Color(0xFF041E49)
-                            Box(
-                                Modifier.clip(CircleShape)
-                                    .background(if (night) selBg else Color.Transparent)
-                                    .clickable { night = !night }
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) {
-                                Text("Night Sight", fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                    color = if (night) selFg else Color.White)
-                            }
-                            Box(
-                                Modifier.clip(CircleShape)
-                                    .background(if (!isVideo) selBg else Color.Transparent)
-                                    .clickable { if (!isRec) isVideo = false }
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) {
-                                Text("Camera", fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                    color = if (!isVideo) selFg else Color.White)
-                            }
-                            Box(
-                                Modifier.clip(CircleShape)
-                                    .background(if (isVideo) selBg else Color.Transparent)
-                                    .clickable { if (!isRec) isVideo = true }
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) {
-                                Text("Video", fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                    color = if (isVideo) selFg else Color.White)
-                            }
-                        }
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 32.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Thumb(thumb, 54.dp, RoundedCornerShape(16.dp)) { openGallery(ctx, lastUri) }
-                            ShutterBtn(86.dp, 4.dp, isVideo, isRec) { onShutter() }
-                            RoundBtn(54.dp, Color(0xFF2B2B2B), onFlip) {
-                                Text("⟳", color = Color.White, fontSize = 23.sp)
-                            }
-                        }
+                    Look.IPHONE -> Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        ModeText("SLO-MO", false, Yellow, 11) { unavailable("SLO-MO") }
+                        ModeText("VIDEO", isVideo, Yellow, 11) { modeVideo() }
+                        ModeText("PHOTO", !isVideo, Yellow, 11) { modePhoto() }
+                        ModeText("PORTRAIT", false, Yellow, 11) { unavailable("PORTRAIT") }
+                        ModeText("PANO", false, Yellow, 11) { unavailable("PANO") }
                     }
                 }
             }
@@ -833,8 +928,8 @@ fun startRecording(ctx: Context, vc: VideoCapture<Recorder>, onFinish: () -> Uni
 }
 
 fun takePhoto(
-    ctx: Context, capture: ImageCapture, look: Look, night: Boolean,
-    ratio: Float, hq: Boolean, onSaved: (Uri) -> Unit
+    ctx: Context, capture: ImageCapture, look: Look, night: Boolean, effect: Int, hdr: Boolean,
+    ratio: Float, hq: Boolean, mirrorFront: Boolean, onSaved: (Uri) -> Unit
 ) {
     val main = Handler(Looper.getMainLooper())
     capture.takePicture(
@@ -856,10 +951,11 @@ fun takePhoto(
                     val m = Matrix()
                     m.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
                     m.postRotate(rot.toFloat())
+                    if (mirrorFront) m.postScale(-1f, 1f)
                     m.postTranslate(cw / 2f, ch / 2f)
                     Canvas(out).drawBitmap(bmp, m, Paint(Paint.FILTER_BITMAP_FLAG))
                     bmp.recycle()
-                    enhance(out, look, night)
+                    enhance(out, look, night, effect, hdr)
                     val cv = ContentValues()
                     cv.put(MediaStore.Images.Media.DISPLAY_NAME, "CT_" + System.currentTimeMillis() + ".jpg")
                     cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
