@@ -86,6 +86,7 @@ enum class Look(val sat: Float, val con: Float, val warm: Float, val lift: Float
     IPHONE(1.08f, 1.00f, 0.05f, 10f)
 }
 
+// معاينة تقريبية فقط، المعالجة الكاملة بتتطبق على الصورة المحفوظة
 fun colorMatrix(l: Look, night: Boolean): ColorMatrix {
     val s = ColorMatrix()
     s.setSaturation(l.sat)
@@ -98,6 +99,148 @@ fun colorMatrix(l: Look, night: Boolean): ColorMatrix {
         0f, 0f, 0f, 1f, 0f))
     s.postConcat(m)
     return s
+}
+
+// ---------- معالجة الصورة الكاملة ----------
+class Params(
+    val target: Double, val contrast: Double, val lift: Double, val black: Double,
+    val hlStart: Double, val hlSlope: Double, val sat: Float, val vib: Float,
+    val wbR: Float, val wbG: Float, val wbB: Float, val clarity: Float, val sharp: Float
+)
+
+fun paramsOf(l: Look): Params = when (l) {
+    Look.IPHONE -> Params(0.47, 0.18, 0.05, 0.0, 0.82, 0.75, 0.12f, 0.6f, 1.03f, 1.0f, 0.97f, 0.15f, 0.35f)
+    Look.S -> Params(0.50, 0.30, 0.04, 0.0, 0.90, 0.90, 0.24f, 0.3f, 1.0f, 1.0f, 1.03f, 0.12f, 0.70f)
+    Look.G -> Params(0.43, 0.38, 0.0, 0.03, 0.80, 0.70, 0.06f, 0.5f, 0.99f, 1.0f, 1.02f, 0.45f, 0.45f)
+}
+
+fun lumOf(c: Int): Float =
+    0.299f * ((c shr 16) and 255) + 0.587f * ((c shr 8) and 255) + 0.114f * (c and 255)
+
+fun boxBlur(a: FloatArray, w: Int, h: Int, r: Int): FloatArray {
+    val tmp = FloatArray(w * h)
+    val out = FloatArray(w * h)
+    val d = (2 * r + 1).toFloat()
+    for (y in 0 until h) {
+        val row = y * w
+        var acc = 0f
+        for (i in -r..r) acc += a[row + i.coerceIn(0, w - 1)]
+        for (x in 0 until w) {
+            tmp[row + x] = acc / d
+            acc += a[row + minOf(x + r + 1, w - 1)] - a[row + maxOf(x - r, 0)]
+        }
+    }
+    for (x in 0 until w) {
+        var acc = 0f
+        for (i in -r..r) acc += tmp[i.coerceIn(0, h - 1) * w + x]
+        for (y in 0 until h) {
+            out[y * w + x] = acc / d
+            acc += tmp[minOf(y + r + 1, h - 1) * w + x] - tmp[maxOf(y - r, 0) * w + x]
+        }
+    }
+    return out
+}
+
+fun enhance(bmp: Bitmap, look: Look, night: Boolean) {
+    val p = paramsOf(look)
+    val w = bmp.width
+    val h = bmp.height
+    val px = IntArray(w * h)
+    bmp.getPixels(px, 0, w, 0, 0, w, h)
+
+    // ضبط الإضاءة تلقائياً
+    var sum = 0.0
+    var n = 0
+    var i = 0
+    while (i < px.size) {
+        sum += lumOf(px[i])
+        n++
+        i += 37
+    }
+    val mean = (sum / n / 255.0).coerceIn(0.05, 0.95)
+    val target = p.target + (if (night) 0.05 else 0.0)
+    val gamma = (Math.log(target) / Math.log(mean)).coerceIn(0.7, 1.4)
+
+    // منحنى الألوان
+    val maxV = p.hlStart + (1.0 - p.hlStart) * p.hlSlope
+    val lut = IntArray(256)
+    for (x in 0..255) {
+        var v = Math.pow(x / 255.0, gamma)
+        val s = v * v * (3.0 - 2.0 * v)
+        v += (s - v) * p.contrast
+        v += p.lift * (1.0 - v) * (1.0 - v)
+        v = (v - p.black) / (1.0 - p.black)
+        if (v > p.hlStart) v = p.hlStart + (v - p.hlStart) * p.hlSlope
+        v /= maxV
+        lut[x] = (v.coerceIn(0.0, 1.0) * 255.0 + 0.5).toInt()
+    }
+
+    // نسخة صغيرة مموهة لحساب الوضوح المحلي
+    val sw = w / 4
+    val sh = h / 4
+    var small = FloatArray(sw * sh)
+    for (sy in 0 until sh) {
+        for (sx in 0 until sw) {
+            var a = 0f
+            for (dy in 0..3) {
+                val row = (sy * 4 + dy) * w + sx * 4
+                for (dx in 0..3) a += lumOf(px[row + dx])
+            }
+            small[sy * sw + sx] = a / 16f
+        }
+    }
+    small = boxBlur(small, sw, sh, 12)
+
+    val res = IntArray(w * h)
+    for (y in 0 until h) {
+        val fy = ((y + 0.5f) / 4f - 0.5f).coerceIn(0f, (sh - 1).toFloat())
+        val y0 = fy.toInt()
+        val y1 = minOf(y0 + 1, sh - 1)
+        val ty = fy - y0
+        for (x in 0 until w) {
+            val idx = y * w + x
+            val c = px[idx]
+            var r = minOf(255f, ((c shr 16) and 255) * p.wbR)
+            var g = minOf(255f, ((c shr 8) and 255) * p.wbG)
+            var b = minOf(255f, (c and 255) * p.wbB)
+
+            val dl = if (x > 0) idx - 1 else idx
+            val dr = if (x < w - 1) idx + 1 else idx
+            val du = if (y > 0) idx - w else idx
+            val dd = if (y < h - 1) idx + w else idx
+            val rawL = lumOf(c)
+            val detail = 4f * rawL - lumOf(px[dl]) - lumOf(px[dr]) - lumOf(px[du]) - lumOf(px[dd])
+
+            val fx = ((x + 0.5f) / 4f - 0.5f).coerceIn(0f, (sw - 1).toFloat())
+            val x0 = fx.toInt()
+            val x1 = minOf(x0 + 1, sw - 1)
+            val tx = fx - x0
+            val top = small[y0 * sw + x0] * (1f - tx) + small[y0 * sw + x1] * tx
+            val bot = small[y1 * sw + x0] * (1f - tx) + small[y1 * sw + x1] * tx
+            val blur = top * (1f - ty) + bot * ty
+
+            var add = (rawL - blur) * p.clarity + detail * p.sharp * 0.25f
+            add = add.coerceIn(-40f, 40f)
+            r = (r + add).coerceIn(0f, 255f)
+            g = (g + add).coerceIn(0f, 255f)
+            b = (b + add).coerceIn(0f, 255f)
+
+            r = lut[r.toInt()].toFloat()
+            g = lut[g.toInt()].toFloat()
+            b = lut[b.toInt()].toFloat()
+
+            val mx = maxOf(r, maxOf(g, b))
+            val mn = minOf(r, minOf(g, b))
+            val sat = if (mx > 0f) (mx - mn) / mx else 0f
+            val f = 1f + p.sat * (1f - p.vib * sat)
+            val ll = 0.299f * r + 0.587f * g + 0.114f * b
+            val ro = (ll + (r - ll) * f).coerceIn(0f, 255f).toInt()
+            val go = (ll + (g - ll) * f).coerceIn(0f, 255f).toInt()
+            val bo = (ll + (b - ll) * f).coerceIn(0f, 255f).toInt()
+            res[idx] = (255 shl 24) or (ro shl 16) or (go shl 8) or bo
+        }
+    }
+    bmp.setPixels(res, 0, w, 0, 0, w, h)
 }
 
 fun flashLabel(f: Int): String = when (f) { 0 -> "⚡A"; 1 -> "⚡"; else -> "⚡✕" }
@@ -702,6 +845,7 @@ fun takePhoto(
                     val bmp = image.toBitmap()
                     val rot = image.imageInfo.rotationDegrees
                     image.close()
+                    main.post { Toast.makeText(ctx, "جاري المعالجة...", Toast.LENGTH_SHORT).show() }
                     val swap = rot == 90 || rot == 270
                     val w = if (swap) bmp.height else bmp.width
                     val h = if (swap) bmp.width else bmp.height
@@ -713,9 +857,9 @@ fun takePhoto(
                     m.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
                     m.postRotate(rot.toFloat())
                     m.postTranslate(cw / 2f, ch / 2f)
-                    val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-                    paint.colorFilter = ColorMatrixColorFilter(colorMatrix(look, night))
-                    Canvas(out).drawBitmap(bmp, m, paint)
+                    Canvas(out).drawBitmap(bmp, m, Paint(Paint.FILTER_BITMAP_FLAG))
+                    bmp.recycle()
+                    enhance(out, look, night)
                     val cv = ContentValues()
                     cv.put(MediaStore.Images.Media.DISPLAY_NAME, "CT_" + System.currentTimeMillis() + ".jpg")
                     cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -728,7 +872,7 @@ fun takePhoto(
                         onSaved(uri)
                         Toast.makeText(ctx, "تم الحفظ في DCIM/CameraThree", Toast.LENGTH_SHORT).show()
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     main.post { Toast.makeText(ctx, "خطأ: " + e.message, Toast.LENGTH_LONG).show() }
                 }
             }
